@@ -273,6 +273,20 @@ jobs:
           output-file: "grype-results.sarif"
           fail-build: "false"
 
+      - name: "Security scan with Grype (JSON)"
+        # yamllint disable-line rule:line-length
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+        id: grype-json
+        # JSON output drives the Markdown table rendered in the job
+        # step summary; it must not fail the job, so fail-build is
+        # false and failures are tolerated.
+        continue-on-error: true
+        with:
+          sbom: "sbom-cyclonedx.json"
+          output-format: "json"
+          output-file: "grype-results.json"
+          fail-build: "false"
+
       # The Table scan owns the pass/fail verdict for the job. Its step
       # log contains the human-readable CVE table, so when this step
       # turns red in the PR Checks UI, clicking through to the workflow
@@ -300,6 +314,7 @@ jobs:
           name: grype-scan-results
           path: |
             grype-results.sarif
+            grype-results.json
             grype-results.txt
           retention-days: 90
           if-no-files-found: ignore
@@ -307,16 +322,66 @@ jobs:
       - name: "Grype summary"
         if: always()
         run: |
-            # Grype summary
+            # Render a Markdown table of Grype matches in the job
+            # step summary. The CVE data is sourced from the JSON
+            # scan output (grype-results.json) and processed with
+            # jq so that multi-word cells cannot accidentally break
+            # the Markdown table column layout. Any literal pipe
+            # characters present in cell content are escaped.
             {
               echo "## Grype Vulnerability Scan"
-              if [ -f grype-results.txt ]; then
-                echo '```'
-                cat grype-results.txt
-                echo '```'
-              else
+              echo ""
+              if [ ! -f grype-results.json ]; then
                 echo "No scan results available"
+                exit 0
               fi
+              match_count=$(jq '.matches | length' grype-results.json)
+              if [ "${match_count}" = "0" ]; then
+                echo "No vulnerabilities found at or above the" \
+                  "configured severity threshold."
+                exit 0
+              fi
+              echo "Found ${match_count} matching Grype record(s)."
+              echo ""
+              echo "| Package | Installed | Fixed In | Type |" \
+                "Vulnerability | Severity | EPSS | Risk |"
+              echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
+              jq -r '
+                def esc: tostring | gsub("\\|"; "\\|");
+                # Round a numeric value to two decimal places.
+                def round2:
+                  . * 100
+                  | (if . >= 0 then floor else -((-. | floor))
+                    end)
+                  / 100;
+                def epss_pct:
+                  ( .vulnerability.epss // [] ) as $e
+                  | if ($e | length) == 0 then "-"
+                    else ( $e[0].epss // 0 ) as $p
+                      | if $p == 0 then "0%"
+                        elif ($p * 100) < 0.01 then "<0.01%"
+                        else ( ($p * 100) | round2 | tostring
+                               + "%" ) end
+                    end;
+                def risk_fmt:
+                  .vulnerability.risk
+                  | if . == null then "-"
+                    elif type == "number" then
+                      (round2 | tostring)
+                    else (. | tostring) end;
+                .matches[] |
+                [ (.artifact.name // "-" | esc),
+                  (.artifact.version // "-" | esc),
+                  ( ( .vulnerability.fix.versions // [] )
+                    | if length == 0 then "-"
+                      else join(", ") end | esc ),
+                  (.artifact.type // "-" | esc),
+                  (.vulnerability.id // "-" | esc),
+                  (.vulnerability.severity // "-" | esc),
+                  epss_pct,
+                  risk_fmt
+                ] | "| " + join(" | ") + " |"
+              ' grype-results.json
             } >> "$GITHUB_STEP_SUMMARY"
 
   # NOTE: PyPI (test and production) will reject duplicate uploads for the
