@@ -293,6 +293,25 @@ jobs:
         with:
           name: sbom-files
 
+      # The SARIF and JSON Grype scans below emit workflow commands
+      # (::warning::Failed minimum severity level...) that the runner
+      # would otherwise lift into duplicate job annotations. Wrap
+      # those scans in a ::stop-commands::/::<token>:: pair so the
+      # commands are logged verbatim but not surfaced as annotations.
+      # Only the final Text/Table scan is left outside the pair, so
+      # it is the sole source of the job's single failure annotation.
+      #
+      # The token is randomised per run to prevent a (malicious)
+      # dependency from re-enabling workflow-command parsing
+      # prematurely via a crafted log line.
+      - name: "Mute annotations for artefact-only scans"
+        id: mute-token
+        run: |
+            # Generate a per-run token and suspend workflow-command parsing
+            token="grype-quiet-$(openssl rand -hex 16)"
+            echo "token=${token}" >> "$GITHUB_OUTPUT"
+            echo "::stop-commands::${token}"
+
       - name: "Security scan with Grype (SARIF)"
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
@@ -320,6 +339,18 @@ jobs:
           output-format: "json"
           output-file: "grype-results.json"
           fail-build: "false"
+
+      # Resume workflow-command parsing. Guarded by `if: always()` so
+      # that even if a preceding scan step failed unexpectedly we do
+      # not leave later steps in this (or any subsequent) job running
+      # with commands disabled.
+      - name: "Resume annotation parsing"
+        if: always()
+        env:
+          MUTE_TOKEN: "${{ steps.mute-token.outputs.token }}"
+        run: |
+            # Resume workflow-command parsing
+            echo "::${MUTE_TOKEN}::"
 
       # The Table scan owns the pass/fail verdict for the job. Its
       # step log contains the human-readable CVE table, so when this
