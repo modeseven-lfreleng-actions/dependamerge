@@ -255,7 +255,7 @@ jobs:
 
       - name: "Download SBOM artefact"
         # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: sbom-files
 
@@ -263,9 +263,9 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
         id: grype-sarif
-        # SARIF output is produced purely for artefact upload (code
-        # scanning ingestion); this step must not fail the job so the
-        # Table step below can render the CVE list in its own log.
+        # SARIF output is produced purely for artefact upload; this
+        # step must not fail the job so the Table step below can
+        # render the CVE list in its own log.
         continue-on-error: true
         with:
           sbom: "sbom-cyclonedx.json"
@@ -287,14 +287,16 @@ jobs:
           output-file: "grype-results.json"
           fail-build: "false"
 
-      # The Table scan owns the pass/fail verdict for the job. Its step
-      # log contains the human-readable CVE table, so when this step
-      # turns red in the PR Checks UI, clicking through to the workflow
-      # log immediately shows the offending packages and CVEs.
+      # The Table scan owns the pass/fail verdict for the job. Its
+      # step log contains the human-readable CVE table, so when this
+      # step turns red in the workflow run's Actions/Checks UI,
+      # clicking through to the workflow log immediately shows the
+      # offending packages and CVEs.
       #
-      # The NO_BLOCK_AUDIT_FAIL repository variable (when set to 'true')
-      # disables failure propagation so releases can proceed when blocked
-      # by newly discovered CVEs in transitive dependencies.
+      # The NO_BLOCK_AUDIT_FAIL repository variable (when set to
+      # 'true') disables failure propagation so releases can proceed
+      # when blocked by newly discovered CVEs in transitive
+      # dependencies.
       - name: "Security scan with Grype (Text/Table)"
         # yamllint disable-line rule:line-length
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
@@ -317,7 +319,7 @@ jobs:
             grype-results.json
             grype-results.txt
           retention-days: 90
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
       - name: "Grype summary"
         if: always()
@@ -348,12 +350,9 @@ jobs:
               echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
               jq -r '
                 def esc: tostring | gsub("\\|"; "\\|");
-                # Round a numeric value to two decimal places.
-                def round2:
-                  . * 100
-                  | (if . >= 0 then floor else -((-. | floor))
-                    end)
-                  / 100;
+                # Round a numeric value to two decimal places
+                # using half-up rounding via jq built-in `round`.
+                def round2: (. * 100 | round) / 100;
                 def epss_pct:
                   ( .vulnerability.epss // [] ) as $e
                   | if ($e | length) == 0 then "-"
@@ -396,6 +395,7 @@ jobs:
       - 'tag-validate'
       - 'python-tests'
       - 'python-audit'
+      - 'grype'
     environment:
       name: 'development'
     permissions:
