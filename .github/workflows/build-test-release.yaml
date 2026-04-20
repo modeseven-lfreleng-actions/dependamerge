@@ -267,16 +267,18 @@ jobs:
       # Only the final Text/Table scan is left outside the pair, so
       # it is the sole source of the job's single failure annotation.
       #
-      # The token is randomised per run to prevent a (malicious)
-      # dependency from re-enabling workflow-command parsing
-      # prematurely via a crafted log line.
+      # The token below is a fixed literal rather than a randomised
+      # per-run value: writing a randomised value through step
+      # outputs causes the runner to auto-mask it as '***' in the
+      # log stream, which breaks stop-commands end-token matching.
+      # The threat model here (hostile transitive dependency
+      # prematurely re-enabling workflow commands by echoing the
+      # token) is negligible for this workflow.
       - name: "Mute annotations for artefact-only scans"
-        id: mute-token
         run: |
-            # Generate a per-run token and suspend workflow-command parsing
-            token="grype-quiet-$(openssl rand -hex 16)"
-            echo "token=${token}" >> "$GITHUB_OUTPUT"
-            echo "::stop-commands::${token}"
+            # Suspend workflow-command parsing until the matching
+            # resume step below
+            echo "::stop-commands::grype-quiet-annotations"
 
       - name: "Security scan with Grype (SARIF)"
         # yamllint disable-line rule:line-length
@@ -312,11 +314,9 @@ jobs:
       # with commands disabled.
       - name: "Resume annotation parsing"
         if: always()
-        env:
-          MUTE_TOKEN: "${{ steps.mute-token.outputs.token }}"
         run: |
             # Resume workflow-command parsing
-            echo "::${MUTE_TOKEN}::"
+            echo "::grype-quiet-annotations::"
 
       # The Table scan owns the pass/fail verdict for the job. Its
       # step log contains the human-readable CVE table, so when this
