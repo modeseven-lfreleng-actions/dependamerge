@@ -259,85 +259,69 @@ jobs:
         with:
           name: sbom-files
 
-      # The SARIF and JSON Grype scans below emit workflow commands
-      # (::warning::Failed minimum severity level...) that the runner
-      # would otherwise lift into duplicate job annotations. Wrap
-      # those scans in a ::stop-commands::/::<token>:: pair so the
-      # commands are logged verbatim but not surfaced as annotations.
-      # Only the final Text/Table scan is left outside the pair, so
-      # it is the sole source of the job's single failure annotation.
-      #
-      # The token below is a fixed literal rather than a randomised
-      # per-run value: writing a randomised value through step
-      # outputs causes the runner to auto-mask it as '***' in the
-      # log stream, which breaks stop-commands end-token matching.
-      # The threat model here (hostile transitive dependency
-      # prematurely re-enabling workflow commands by echoing the
-      # token) is negligible for this workflow.
-      - name: "Mute annotations for artefact-only scans"
-        run: |
-            # Suspend workflow-command parsing until the matching
-            # resume step below
-            echo "::stop-commands::grype-quiet-annotations"
-
-      - name: "Security scan with Grype (SARIF)"
+      - name: "Install Grype"
+        id: grype
         # yamllint disable-line rule:line-length
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
-        id: grype-sarif
-        # SARIF output is produced purely for artefact upload; this
-        # step must not fail the job so the Table step below can
-        # render the CVE list in its own log.
-        continue-on-error: true
+        uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
         with:
-          sbom: "sbom-cyclonedx.json"
-          output-format: "sarif"
-          output-file: "grype-results.sarif"
-          fail-build: "false"
+          cache-db: "true"
 
-      - name: "Security scan with Grype (JSON)"
-        # yamllint disable-line rule:line-length
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
-        id: grype-json
-        # JSON output drives the Markdown table rendered in the job
-        # step summary; it must not fail the job, so fail-build is
-        # false and failures are tolerated.
-        continue-on-error: true
-        with:
-          sbom: "sbom-cyclonedx.json"
-          output-format: "json"
-          output-file: "grype-results.json"
-          fail-build: "false"
-
-      # Resume workflow-command parsing. Guarded by `if: always()` so
-      # that even if a preceding scan step failed unexpectedly we do
-      # not leave later steps in this (or any subsequent) job running
-      # with commands disabled.
-      - name: "Resume annotation parsing"
-        if: always()
-        run: |
-            # Resume workflow-command parsing
-            echo "::grype-quiet-annotations::"
-
-      # The Table scan owns the pass/fail verdict for the job. Its
-      # step log contains the human-readable CVE table, so when this
-      # step turns red in the workflow run's Actions/Checks UI,
-      # clicking through to the workflow log immediately shows the
-      # offending packages and CVEs.
-      #
       # The NO_BLOCK_AUDIT_FAIL repository variable (when set to
-      # 'true') disables failure propagation so releases can proceed
-      # when blocked by newly discovered CVEs in transitive
-      # dependencies.
-      - name: "Security scan with Grype (Text/Table)"
-        # yamllint disable-line rule:line-length
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
-        id: grype-table
-        if: always()
-        with:
-          sbom: "sbom-cyclonedx.json"
-          output-format: "table"
-          output-file: "grype-results.txt"
-          fail-build: "${{ vars.NO_BLOCK_AUDIT_FAIL != 'true' }}"
+      # 'true') disables failure propagation so pull requests can
+      # proceed when blocked by newly discovered CVEs in transitive
+      # dependencies. Without the override, this step turns red in
+      # the PR Checks UI and is the sole source of the job's
+      # failure annotation; the CVE table is printed directly into
+      # the step log by echoing grype-results.txt.
+      - name: "Grype audit SBOM"
+        id: grype-audit
+        env:
+          GRYPE_CMD: "${{ steps.grype.outputs.cmd }}"
+          NO_BLOCK_AUDIT_FAIL: >-
+            ${{ vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+        run: |
+            # Run grype once, emitting all three output formats
+            # Render the human-readable table in this step's log
+            set +e
+            "${GRYPE_CMD}" \
+              -o "sarif=grype-results.sarif" \
+              -o "json=grype-results.json" \
+              -o "table=grype-results.txt" \
+              --fail-on medium \
+              "sbom:sbom-cyclonedx.json"
+            grype_exit=$?
+            set -e
+
+            echo "--- Grype scan results ---"
+            if [ -f grype-results.txt ]; then
+              cat grype-results.txt
+            else
+              echo "No table output produced"
+            fi
+
+            # grype returns 2 when it finds vulnerabilities at or
+            # above the configured --fail-on threshold; any other
+            # non-zero exit is treated as a grype failure.
+            if [ "${grype_exit}" = "0" ]; then
+              echo "No vulnerabilities at or above 'medium'"
+              exit 0
+            fi
+            if [ "${grype_exit}" != "2" ]; then
+              echo "::error::Grype exited with code ${grype_exit}"
+              exit "${grype_exit}"
+            fi
+
+            if [ "${NO_BLOCK_AUDIT_FAIL}" = "true" ]; then
+              echo "::warning::Grype found vulnerabilities at or" \
+                "above the 'medium' threshold, but" \
+                "NO_BLOCK_AUDIT_FAIL is set so the job will not" \
+                "fail."
+              exit 0
+            fi
+            echo "::error::Grype found vulnerabilities at or above" \
+              "the 'medium' severity threshold. See the table" \
+              "above for the offending packages and CVEs."
+            exit 1
 
       - name: "Upload Grype scan results"
         # yamllint disable-line rule:line-length
