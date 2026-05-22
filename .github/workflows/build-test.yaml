@@ -43,6 +43,23 @@ jobs:
       # When the CONNECTION_WHITELIST repo/org variable is exposed
       # to this run (i.e. not a fork PR), use it to enforce a
       # block-mode egress policy.
+      # Load the egress allow-list out-of-band from
+      # lfreleng-actions/.github so harden-runner can run in 'block' mode
+      # without depending on the org-level vars.CONNECTION_WHITELIST being
+      # reachable from this workflow (it is not, for PRs raised from
+      # forks). Publishes the sanitised list as $CONNECTION_WHITELIST for
+      # downstream steps to consume in a follow-up change.
+      #
+      # Temporarily pinned to a branch in a fork because the action
+      # is still under review in
+      # lfreleng-actions/harden-runner-block-action#5. Once that PR
+      # merges and is tagged, update this 'uses:' to a tagged release
+      # in lfreleng-actions/.
+      # yamllint disable-line rule:line-length
+      - uses: modeseven-lfreleng-actions/harden-runner-block-action@feat/whitelist-loader
+        with:
+          org: 'lfreleng-actions'
+
       - name: 'Harden runner (block egress with whitelist)'
         if: ${{ vars.CONNECTION_WHITELIST != '' }}
         # yamllint disable-line rule:line-length
@@ -95,6 +112,23 @@ jobs:
       # When the CONNECTION_WHITELIST repo/org variable is exposed
       # to this run (i.e. not a fork PR), use it to enforce a
       # block-mode egress policy.
+      # Load the egress allow-list out-of-band from
+      # lfreleng-actions/.github so harden-runner can run in 'block' mode
+      # without depending on the org-level vars.CONNECTION_WHITELIST being
+      # reachable from this workflow (it is not, for PRs raised from
+      # forks). Publishes the sanitised list as $CONNECTION_WHITELIST for
+      # downstream steps to consume in a follow-up change.
+      #
+      # Temporarily pinned to a branch in a fork because the action
+      # is still under review in
+      # lfreleng-actions/harden-runner-block-action#5. Once that PR
+      # merges and is tagged, update this 'uses:' to a tagged release
+      # in lfreleng-actions/.
+      # yamllint disable-line rule:line-length
+      - uses: modeseven-lfreleng-actions/harden-runner-block-action@feat/whitelist-loader
+        with:
+          org: 'lfreleng-actions'
+
       - name: 'Harden runner (block egress with whitelist)'
         if: ${{ vars.CONNECTION_WHITELIST != '' }}
         # yamllint disable-line rule:line-length
@@ -196,6 +230,23 @@ jobs:
       # When the CONNECTION_WHITELIST repo/org variable is exposed
       # to this run (i.e. not a fork PR), use it to enforce a
       # block-mode egress policy.
+      # Load the egress allow-list out-of-band from
+      # lfreleng-actions/.github so harden-runner can run in 'block' mode
+      # without depending on the org-level vars.CONNECTION_WHITELIST being
+      # reachable from this workflow (it is not, for PRs raised from
+      # forks). Publishes the sanitised list as $CONNECTION_WHITELIST for
+      # downstream steps to consume in a follow-up change.
+      #
+      # Temporarily pinned to a branch in a fork because the action
+      # is still under review in
+      # lfreleng-actions/harden-runner-block-action#5. Once that PR
+      # merges and is tagged, update this 'uses:' to a tagged release
+      # in lfreleng-actions/.
+      # yamllint disable-line rule:line-length
+      - uses: modeseven-lfreleng-actions/harden-runner-block-action@feat/whitelist-loader
+        with:
+          org: 'lfreleng-actions'
+
       - name: 'Harden runner (block egress with whitelist)'
         if: ${{ vars.CONNECTION_WHITELIST != '' }}
         # yamllint disable-line rule:line-length
@@ -241,6 +292,23 @@ jobs:
       # When the CONNECTION_WHITELIST repo/org variable is exposed
       # to this run (i.e. not a fork PR), use it to enforce a
       # block-mode egress policy.
+      # Load the egress allow-list out-of-band from
+      # lfreleng-actions/.github so harden-runner can run in 'block' mode
+      # without depending on the org-level vars.CONNECTION_WHITELIST being
+      # reachable from this workflow (it is not, for PRs raised from
+      # forks). Publishes the sanitised list as $CONNECTION_WHITELIST for
+      # downstream steps to consume in a follow-up change.
+      #
+      # Temporarily pinned to a branch in a fork because the action
+      # is still under review in
+      # lfreleng-actions/harden-runner-block-action#5. Once that PR
+      # merges and is tagged, update this 'uses:' to a tagged release
+      # in lfreleng-actions/.
+      # yamllint disable-line rule:line-length
+      - uses: modeseven-lfreleng-actions/harden-runner-block-action@feat/whitelist-loader
+        with:
+          org: 'lfreleng-actions'
+
       - name: 'Harden runner (block egress with whitelist)'
         if: ${{ vars.CONNECTION_WHITELIST != '' }}
         # yamllint disable-line rule:line-length
@@ -287,6 +355,23 @@ jobs:
       # When the CONNECTION_WHITELIST repo/org variable is exposed
       # to this run (i.e. not a fork PR), use it to enforce a
       # block-mode egress policy.
+      # Load the egress allow-list out-of-band from
+      # lfreleng-actions/.github so harden-runner can run in 'block' mode
+      # without depending on the org-level vars.CONNECTION_WHITELIST being
+      # reachable from this workflow (it is not, for PRs raised from
+      # forks). Publishes the sanitised list as $CONNECTION_WHITELIST for
+      # downstream steps to consume in a follow-up change.
+      #
+      # Temporarily pinned to a branch in a fork because the action
+      # is still under review in
+      # lfreleng-actions/harden-runner-block-action#5. Once that PR
+      # merges and is tagged, update this 'uses:' to a tagged release
+      # in lfreleng-actions/.
+      # yamllint disable-line rule:line-length
+      - uses: modeseven-lfreleng-actions/harden-runner-block-action@feat/whitelist-loader
+        with:
+          org: 'lfreleng-actions'
+
       - name: 'Harden runner (block egress with whitelist)'
         if: ${{ vars.CONNECTION_WHITELIST != '' }}
         # yamllint disable-line rule:line-length
@@ -330,6 +415,23 @@ jobs:
       # When the CONNECTION_WHITELIST repo/org variable is exposed
       # to this run (i.e. not a fork PR), use it to enforce a
       # block-mode egress policy.
+      # Load the egress allow-list out-of-band from
+      # lfreleng-actions/.github so harden-runner can run in 'block' mode
+      # without depending on the org-level vars.CONNECTION_WHITELIST being
+      # reachable from this workflow (it is not, for PRs raised from
+      # forks). Publishes the sanitised list as $CONNECTION_WHITELIST for
+      # downstream steps to consume in a follow-up change.
+      #
+      # Temporarily pinned to a branch in a fork because the action
+      # is still under review in
+      # lfreleng-actions/harden-runner-block-action#5. Once that PR
+      # merges and is tagged, update this 'uses:' to a tagged release
+      # in lfreleng-actions/.
+      # yamllint disable-line rule:line-length
+      - uses: modeseven-lfreleng-actions/harden-runner-block-action@feat/whitelist-loader
+        with:
+          org: 'lfreleng-actions'
+
       - name: 'Harden runner (block egress with whitelist)'
         if: ${{ vars.CONNECTION_WHITELIST != '' }}
         # yamllint disable-line rule:line-length
@@ -393,6 +495,23 @@ jobs:
       # When the CONNECTION_WHITELIST repo/org variable is exposed
       # to this run (i.e. not a fork PR), use it to enforce a
       # block-mode egress policy.
+      # Load the egress allow-list out-of-band from
+      # lfreleng-actions/.github so harden-runner can run in 'block' mode
+      # without depending on the org-level vars.CONNECTION_WHITELIST being
+      # reachable from this workflow (it is not, for PRs raised from
+      # forks). Publishes the sanitised list as $CONNECTION_WHITELIST for
+      # downstream steps to consume in a follow-up change.
+      #
+      # Temporarily pinned to a branch in a fork because the action
+      # is still under review in
+      # lfreleng-actions/harden-runner-block-action#5. Once that PR
+      # merges and is tagged, update this 'uses:' to a tagged release
+      # in lfreleng-actions/.
+      # yamllint disable-line rule:line-length
+      - uses: modeseven-lfreleng-actions/harden-runner-block-action@feat/whitelist-loader
+        with:
+          org: 'lfreleng-actions'
+
       - name: 'Harden runner (block egress with whitelist)'
         if: ${{ vars.CONNECTION_WHITELIST != '' }}
         # yamllint disable-line rule:line-length
