@@ -1614,6 +1614,73 @@ class AsyncMergeManager:
                         )
                     return result
 
+                # The wait can expire with the PR still blocked on a
+                # pre-commit.ci run that will never finish.  Step 0.5
+                # only retriggers a run that was already stale when
+                # processing *started*; a run that went pending shortly
+                # before this run began crosses the stuck threshold
+                # *during* the wait above, so without this re-check the
+                # merge below fails on the pending check without the
+                # recovery macro ever being posted.  The helper re-gates
+                # on required-check status, pending age, and duplicate
+                # comments, so this is a no-op unless the run is
+                # genuinely stuck.
+                if (
+                    pr_info.mergeable_state == "blocked"
+                    and self._github_client is not None
+                ):
+                    late_precommit_fixed = await self._trigger_stale_precommit_ci(
+                        pr_info
+                    )
+                    if late_precommit_fixed:
+                        # pre-commit.ci now reports success.  Auto-merge
+                        # was armed before the wait, so GitHub may merge
+                        # the PR the moment the check lands — re-fetch
+                        # and short-circuit on a closed PR before
+                        # attempting a manual merge below.
+                        late_updated: Any = None
+                        try:
+                            late_updated = await self._github_client.get(
+                                f"/repos/{repo_owner}/{repo_name}"
+                                f"/pulls/{pr_info.number}"
+                            )
+                        except Exception as e:
+                            self.log.debug(
+                                "Failed to refresh PR %s state after "
+                                "post-wait pre-commit.ci rerun: %s",
+                                pr_key_for_wait,
+                                e,
+                            )
+                        if isinstance(late_updated, dict):
+                            if late_updated.get("state") == "closed":
+                                pr_info.state = "closed"
+                                if late_updated.get("merged", False):
+                                    result.status = MergeStatus.MERGED
+                                    self._pr_status(
+                                        f"✅ Merged (auto-merge): {pr_info.html_url}",
+                                        level="debug",
+                                    )
+                                else:
+                                    result.status = MergeStatus.CLOSED
+                                    result.error = (
+                                        "PR closed without merging during "
+                                        "auto-merge wait "
+                                        "(no operator follow-up needed)"
+                                    )
+                                    self._pr_status(
+                                        f"🚪 Closed without merging: "
+                                        f"{pr_info.html_url}",
+                                        level="warning",
+                                    )
+                                return result
+                            pr_info.mergeable = late_updated.get("mergeable")
+                            pr_info.mergeable_state = late_updated.get(
+                                "mergeable_state"
+                            )
+                            updated_head = (late_updated.get("head") or {}).get("sha")
+                            if updated_head:
+                                pr_info.head_sha = updated_head
+
             result.status = MergeStatus.MERGING
             if self.preview_mode:
                 self._simulate_preview_merge(pr_info, result)

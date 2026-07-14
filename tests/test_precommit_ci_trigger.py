@@ -15,13 +15,16 @@ Covers:
 - Ruleset branch filtering (_ruleset_applies_to_branch)
 """
 
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from dependamerge.github2gerrit_detector import GitHub2GerritDetectionResult
 from dependamerge.github_async import GitHubAsync
+from dependamerge.merge_manager import MergeStatus
 from dependamerge.models import PullRequestInfo
 
 
@@ -672,3 +675,167 @@ class TestRulesetAppliesToBranch:
         }
         assert self._method(cond, "main", default_branch="main") is False
         assert self._method(cond, "feature/x", default_branch="main") is True
+
+
+# ---------------------------------------------------------------------------
+# 9. Post-wait staleness re-check in _merge_single_pr (Step 5.5)
+# ---------------------------------------------------------------------------
+class TestPostWaitRetrigger:
+    """Step 5.5 must re-check pre-commit.ci staleness after its wait.
+
+    Step 0.5 only retriggers a run that was already stale when
+    processing started; a run that went pending shortly before the run
+    began crosses the stuck threshold *during* the Step 5.5 wait.
+    These tests drive ``_merge_single_pr`` with the wait mocked to
+    expire while the PR is still blocked and assert the retrigger is
+    invoked a second time (post-wait) and the flow routes correctly
+    afterwards.
+    """
+
+    @staticmethod
+    def _step5_5_patches(mgr, trigger_mock, merge_retry_mock):
+        """Common patch set to reach Step 5.5 with a blocked PR."""
+        no_g2g = GitHub2GerritDetectionResult()
+        return (
+            patch.object(
+                mgr,
+                "_detect_github2gerrit",
+                new_callable=AsyncMock,
+                return_value=no_g2g,
+            ),
+            patch.object(
+                mgr,
+                "_get_merge_method_for_repo",
+                new_callable=AsyncMock,
+                return_value="merge",
+            ),
+            patch.object(mgr, "_trigger_stale_precommit_ci", trigger_mock),
+            patch.object(
+                mgr,
+                "_check_merge_requirements",
+                new_callable=AsyncMock,
+                return_value=(True, ""),
+            ),
+            patch.object(
+                mgr,
+                "_blocked_pr_needs_rebase",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                mgr,
+                "_approve_pr",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                mgr,
+                "_wait_for_auto_merge",
+                new_callable=AsyncMock,
+                return_value=(False, False),
+            ),
+            patch.object(mgr, "_merge_pr_with_retry", merge_retry_mock),
+        )
+
+    def _make_blocked_pr(self):
+        return _make_pr_info(
+            node_id="PR_kwDOTestNode42",
+            mergeable_state="blocked",
+            mergeable=True,
+            state="open",
+        )
+
+    @pytest.mark.asyncio
+    async def test_retrigger_fires_after_wait_and_detects_auto_merge(self):
+        """Post-wait retrigger succeeds; auto-merge landed the PR."""
+        mgr, client = _make_manager()
+        pr = self._make_blocked_pr()
+
+        client.enable_auto_merge = AsyncMock(return_value=True)
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by pending required check: pre-commit.ci - pr"
+        )
+        # Post-retrigger refresh: auto-merge fired the moment the
+        # check landed, so the PR is already closed and merged.
+        client.get = AsyncMock(return_value={"state": "closed", "merged": True})
+
+        # Step 0.5 finds the run not yet stale (False); the post-wait
+        # re-check finds it stuck and recovers it (True).
+        trigger = AsyncMock(side_effect=[False, True])
+        merge_retry = AsyncMock(return_value=True)
+
+        patches = self._step5_5_patches(mgr, trigger, merge_retry)
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result = await mgr._merge_single_pr(pr)
+
+        assert trigger.await_count == 2
+        assert result.status == MergeStatus.MERGED
+        merge_retry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retrigger_failure_still_routes_to_auto_merge_pending(self):
+        """Retrigger cannot recover; flow falls through to Step 6."""
+        mgr, client = _make_manager()
+        pr = self._make_blocked_pr()
+
+        client.enable_auto_merge = AsyncMock(return_value=True)
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by pending required check: pre-commit.ci - pr"
+        )
+        client.get = AsyncMock(return_value={})
+
+        trigger = AsyncMock(return_value=False)
+        merge_retry = AsyncMock(return_value=True)
+
+        patches = self._step5_5_patches(mgr, trigger, merge_retry)
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result = await mgr._merge_single_pr(pr)
+
+        # Called at Step 0.5 AND again after the wait expired.
+        assert trigger.await_count == 2
+        # Auto-merge is armed and the block reason is pending checks,
+        # so the run defers to auto-merge rather than failing.
+        assert result.status == MergeStatus.AUTO_MERGE_PENDING
+        merge_retry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retrigger_success_with_open_pr_proceeds_to_merge(self):
+        """Retrigger succeeds and the PR is now clean: manual merge runs."""
+        mgr, client = _make_manager()
+        pr = self._make_blocked_pr()
+
+        client.enable_auto_merge = AsyncMock(return_value=True)
+        client.analyze_block_reason = AsyncMock(
+            return_value="Blocked by pending required check: pre-commit.ci - pr"
+        )
+        # Post-retrigger refresh: still open, now clean.
+        client.get = AsyncMock(
+            return_value={
+                "state": "open",
+                "merged": False,
+                "mergeable": True,
+                "mergeable_state": "clean",
+                "head": {"sha": "def789refresh"},
+            }
+        )
+
+        trigger = AsyncMock(side_effect=[False, True])
+        merge_retry = AsyncMock(return_value=True)
+
+        patches = self._step5_5_patches(mgr, trigger, merge_retry)
+        with ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            result = await mgr._merge_single_pr(pr)
+
+        assert trigger.await_count == 2
+        # The refresh updated the snapshot from the live payload.
+        assert pr.mergeable_state == "clean"
+        assert pr.head_sha == "def789refresh"
+        # Clean state bypasses the auto-merge skip gate: manual merge.
+        merge_retry.assert_called_once()
+        assert result.status == MergeStatus.MERGED
