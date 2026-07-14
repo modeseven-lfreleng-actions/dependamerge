@@ -1853,6 +1853,35 @@ class AsyncMergeManager:
                         ):
                             merged = True
 
+                    # A 405 "Required workflows … are not satisfied"
+                    # rejection means ruleset-required workflows are
+                    # still *executing* on the head commit — a pending
+                    # condition, unlike the terminal "… failed"
+                    # variant.  Wait for them to finish and retry
+                    # rather than failing a PR whose checks are still
+                    # green.  Skipped when Step 5/5.5 already spent
+                    # this PR's wait budget (the workflows are then
+                    # genuinely slower than merge_timeout) and under
+                    # --force=all (force semantics bypass waits).
+                    if (
+                        not merged
+                        and not should_wait
+                        and not already_rebased
+                        and self.force_level != "all"
+                    ):
+                        last_merge_exc = self._last_merge_exception.get(pr_key)
+                        if (
+                            last_merge_exc is not None
+                            and self._merge_error_indicates_pending_workflows(
+                                str(last_merge_exc)
+                            )
+                        ):
+                            merged = (
+                                await self._wait_for_required_workflows_and_retry(
+                                    pr_info, repo_owner, repo_name
+                                )
+                            )
+
                 if merged is None:
                     # Auto-merge is active — PR will merge asynchronously.
                     # Tailor the reason to the actual ``mergeable_state``
@@ -2964,6 +2993,38 @@ class AsyncMergeManager:
             or "approving review" in text
             or "review required" in text
         )
+
+    @staticmethod
+    def _merge_error_indicates_pending_workflows(error_text: str) -> bool:
+        """Detect still-executing required workflows in a merge error body.
+
+        GitHub's merge endpoint rejects with 405 "Repository rule
+        violations found … Required workflows 'X' are not satisfied"
+        while ruleset-required workflows are still *executing* on the
+        head commit — a pending condition that clears by itself once
+        they finish.  That is distinct from the failure variant
+        ("Required workflows 'X' … fail…"), where a workflow ran and
+        reported failure: terminal, retrying cannot help.
+
+        Only the clause starting at the ``required workflow`` wording
+        is inspected, because the enhanced exception text always begins
+        with "Failed to merge PR …" — matching ``fail`` against the
+        whole message would classify every rejection as terminal.  A
+        workflow *name* containing "fail" also suppresses the match;
+        that conservative false negative merely preserves the previous
+        fail-fast behaviour.
+        """
+        if not error_text:
+            return False
+        text = error_text.lower()
+        idx = text.find("required workflow")
+        if idx == -1:
+            return False
+        clause = text[idx:]
+        # Trim the PR-state context ``_validate_merge_result`` appends
+        # after GitHub's detail so it cannot influence classification.
+        clause = clause.split(" (pr state:", 1)[0]
+        return "not satisfied" in clause and "fail" not in clause
 
     async def _check_merge_requirements(
         self, pr_info: PullRequestInfo
@@ -4358,6 +4419,111 @@ class AsyncMergeManager:
             f"_merge_pr_with_retry returning False for {owner}/{repo}#{pr_info.number} after all retries"
         )
         return False
+
+    async def _wait_for_required_workflows_and_retry(
+        self, pr_info: PullRequestInfo, owner: str, repo: str
+    ) -> bool:
+        """Wait out still-executing required workflows, then retry the merge.
+
+        Recovery for a merge rejected with 405 "Repository rule
+        violations found … Required workflows '…' are not satisfied"
+        (see :meth:`_merge_error_indicates_pending_workflows`): the
+        ruleset-required workflows are still running, so the rejection
+        is pending, not terminal.  Alternates between waiting for the
+        PR to leave a blocked/unstable state and re-attempting the
+        merge, all under one shared deadline of ``merge_timeout`` (the
+        same shared-budget pattern conflict recovery uses for its
+        rebase/checks phases) so the recovery can never double-spend
+        the wait budget.  Each cycle dispatches a *single* merge call
+        rather than :meth:`_merge_pr_with_retry`, whose internal
+        retry ladder would multiply the number of merge attempts.
+
+        The loop also covers the stale-``clean`` snapshot case (the
+        REST ``mergeable_state`` can lag behind or be blind to ruleset
+        workflows): when the wait exits immediately because the cached
+        state already looks mergeable, the failed re-merge plus the
+        interval sleep below degrade gracefully into a bounded
+        merge-poll loop.
+
+        Returns True when a retry merged the PR (or it merged on its
+        own during the wait); False otherwise, leaving the last stored
+        merge exception in place for the caller's failure reporting.
+        """
+        if self._github_client is None or self.preview_mode or self._no_wait:
+            return False
+
+        pr_key = f"{owner}/{repo}#{pr_info.number}"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._merge_timeout
+        if self._run_deadline is not None:
+            deadline = min(deadline, self._run_deadline)
+
+        merge_method = self._pr_merge_methods.get(
+            f"{owner}/{repo}", self.default_merge_method
+        )
+
+        self._pr_status(
+            f"⏳ Waiting: {pr_info.html_url} [required workflows still running]",
+            level="info",
+        )
+
+        # Refresh so the wait loop starts from live state rather than
+        # the (possibly stale-``clean``) snapshot that let the doomed
+        # merge dispatch in the first place.
+        try:
+            refreshed = await self._github_client.get(
+                f"/repos/{owner}/{repo}/pulls/{pr_info.number}"
+            )
+            if isinstance(refreshed, dict):
+                if refreshed.get("mergeable") is not None:
+                    pr_info.mergeable = refreshed.get("mergeable")
+                refreshed_state = refreshed.get("mergeable_state")
+                if refreshed_state not in (None, "", "unknown"):
+                    pr_info.mergeable_state = refreshed_state
+                refreshed_head = (refreshed.get("head") or {}).get("sha")
+                if refreshed_head:
+                    pr_info.head_sha = refreshed_head
+        except Exception as exc:
+            self.log.debug(
+                "Failed to refresh %s before required-workflows wait: %s",
+                pr_key,
+                exc,
+            )
+
+        self._track_pr_state(pr_info, "waiting")
+        try:
+            while True:
+                closed, merged_during = await self._wait_for_auto_merge(
+                    pr_info,
+                    owner,
+                    repo,
+                    continue_states=("blocked", "unstable"),
+                    deadline=deadline,
+                )
+                if closed:
+                    return merged_during
+                try:
+                    merged = await self._github_client.merge_pull_request(
+                        owner, repo, pr_info.number, merge_method
+                    )
+                except GitHubPermissionError:
+                    raise
+                except Exception as exc:
+                    self._last_merge_exception[pr_key] = exc
+                    if not self._merge_error_indicates_pending_workflows(str(exc)):
+                        # The rejection reason changed (e.g. a workflow
+                        # finished and *failed*) — terminal; let the
+                        # caller classify and report it.
+                        return False
+                    merged = False
+                if merged:
+                    return True
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+                await asyncio.sleep(min(self._merge_recheck_interval, remaining))
+        finally:
+            self._track_pr_state(pr_info, None)
 
     async def _is_pr_already_merged(
         self, pr_info: PullRequestInfo, owner: str, repo: str

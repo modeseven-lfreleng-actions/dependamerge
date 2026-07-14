@@ -735,3 +735,346 @@ class TestFailureSummarySurfacesGitHubDetail:
         # The actionable GitHub message is returned, trimmed of the
         # appended PR-state context.
         assert summary == "Required workflows 'Autolabeler' are not satisfied"
+
+
+# -------------------------------------------------------------------
+# Pending required-workflows classification and recovery
+# -------------------------------------------------------------------
+
+
+def _make_405_workflows_not_satisfied_exception() -> Exception:
+    """405 carrying GitHub's "Required workflows ... not satisfied" body.
+
+    Mirrors the enhanced error produced by ``_validate_merge_result``
+    when ruleset-required workflows are still *executing* on the head
+    commit — a pending condition, not a terminal failure.
+    """
+    return Exception(
+        "Failed to merge PR #39 in org/repo. Error: Client error "
+        "'405 Method Not Allowed' for url "
+        "'https://api.github.com/repos/org/repo/pulls/39/merge'. "
+        "GitHub: Repository rule violations found Required workflows "
+        "'Verify Token Permissions' are not satisfied (PR state: open, "
+        "mergeable: True, mergeable_state: blocked) "
+        "[blocked by branch protection / required checks]"
+    )
+
+
+def _make_405_workflows_failed_exception() -> Exception:
+    """405 whose required-workflows clause reports a *failure*."""
+    return Exception(
+        "Failed to merge PR #39 in org/repo. Error: Client error "
+        "'405 Method Not Allowed' for url "
+        "'https://api.github.com/repos/org/repo/pulls/39/merge'. "
+        "GitHub: Repository rule violations found Required workflows "
+        "'Verify Token Permissions' failed (PR state: open, "
+        "mergeable: True, mergeable_state: blocked)"
+    )
+
+
+class TestMergeErrorIndicatesPendingWorkflows:
+    """Classification of 405 required-workflows rejection bodies."""
+
+    def _mgr(self) -> AsyncMergeManager:
+        mgr, _client = make_merge_manager(merge_method="merge")
+        return mgr
+
+    def test_not_satisfied_is_pending(self):
+        """ "not satisfied" (workflows still executing) is pending."""
+        mgr = self._mgr()
+        exc = _make_405_workflows_not_satisfied_exception()
+        assert mgr._merge_error_indicates_pending_workflows(str(exc)) is True
+
+    def test_failed_variant_is_terminal(self):
+        """A workflow that ran and failed must stay terminal."""
+        mgr = self._mgr()
+        exc = _make_405_workflows_failed_exception()
+        assert mgr._merge_error_indicates_pending_workflows(str(exc)) is False
+
+    def test_leading_failed_to_merge_prefix_does_not_poison(self):
+        """The "Failed to merge PR" prefix must not read as failure.
+
+        Only the clause from the ``required workflow`` wording onward
+        is inspected; the enhanced exception text always starts with
+        "Failed to merge PR …".
+        """
+        mgr = self._mgr()
+        text = (
+            "Failed to merge PR #39 in org/repo. "
+            "GitHub: Required workflows 'CI' are not satisfied"
+        )
+        assert mgr._merge_error_indicates_pending_workflows(text) is True
+
+    def test_pr_state_suffix_is_trimmed(self):
+        """Failure wording after the PR-state context is ignored."""
+        mgr = self._mgr()
+        text = (
+            "Failed to merge PR #39 in org/repo. "
+            "GitHub: Required workflows 'CI' are not satisfied "
+            "(PR state: open, mergeable: False, mergeable_state: "
+            "blocked) [blocked by failing checks]"
+        )
+        assert mgr._merge_error_indicates_pending_workflows(text) is True
+
+    def test_required_status_checks_not_matched(self):
+        """Status-check violations are a different condition."""
+        mgr = self._mgr()
+        text = (
+            "Failed to merge PR #39 in org/repo. "
+            "GitHub: Repository rule violations found Required status "
+            'check "pre-commit.ci - pr" is expected.'
+        )
+        assert mgr._merge_error_indicates_pending_workflows(text) is False
+
+    def test_empty_text_returns_false(self):
+        mgr = self._mgr()
+        assert mgr._merge_error_indicates_pending_workflows("") is False
+
+
+class TestWaitForRequiredWorkflowsAndRetry:
+    """Behaviour of the pending-workflows wait-and-retry recovery."""
+
+    def _make_mgr(self, **overrides):
+        defaults = {"merge_method": "merge", "preview_mode": False}
+        defaults.update(overrides)
+        return make_merge_manager(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_preview_mode_returns_false_without_side_effects(self):
+        mgr, client = self._make_mgr(preview_mode=True)
+        pr = _make_pr_info(mergeable_state="blocked")
+
+        result = await mgr._wait_for_required_workflows_and_retry(pr, "org", "repo")
+
+        assert result is False
+        client.merge_pull_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_merged_during_wait_returns_true(self):
+        mgr, client = self._make_mgr()
+        pr = _make_pr_info(mergeable_state="blocked")
+        client.get = AsyncMock(
+            return_value={
+                "mergeable": True,
+                "mergeable_state": "blocked",
+                "state": "open",
+            }
+        )
+
+        with patch.object(
+            mgr,
+            "_wait_for_auto_merge",
+            new_callable=AsyncMock,
+            return_value=(True, True),
+        ):
+            result = await mgr._wait_for_required_workflows_and_retry(pr, "org", "repo")
+
+        assert result is True
+        client.merge_pull_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_closed_without_merge_returns_false(self):
+        mgr, client = self._make_mgr()
+        pr = _make_pr_info(mergeable_state="blocked")
+        client.get = AsyncMock(return_value={})
+
+        with patch.object(
+            mgr,
+            "_wait_for_auto_merge",
+            new_callable=AsyncMock,
+            return_value=(True, False),
+        ):
+            result = await mgr._wait_for_required_workflows_and_retry(pr, "org", "repo")
+
+        assert result is False
+        client.merge_pull_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wait_then_merge_succeeds(self):
+        """Workflows finish during the wait; the retry lands the merge."""
+        mgr, client = self._make_mgr()
+        pr = _make_pr_info(mergeable_state="blocked")
+        client.get = AsyncMock(
+            return_value={
+                "mergeable": True,
+                "mergeable_state": "blocked",
+                "state": "open",
+            }
+        )
+        client.merge_pull_request = AsyncMock(return_value=True)
+
+        with patch.object(
+            mgr,
+            "_wait_for_auto_merge",
+            new_callable=AsyncMock,
+            return_value=(False, False),
+        ):
+            result = await mgr._wait_for_required_workflows_and_retry(pr, "org", "repo")
+
+        assert result is True
+        client.merge_pull_request.assert_awaited_once_with("org", "repo", 39, "merge")
+
+    @pytest.mark.asyncio
+    async def test_different_rejection_reason_stops_recovery(self):
+        """A changed rejection reason is left to the caller's classifier."""
+        mgr, client = self._make_mgr()
+        pr = _make_pr_info(mergeable_state="blocked")
+        client.get = AsyncMock(return_value={})
+        terminal_exc = _make_405_workflows_failed_exception()
+        client.merge_pull_request = AsyncMock(side_effect=terminal_exc)
+
+        with patch.object(
+            mgr,
+            "_wait_for_auto_merge",
+            new_callable=AsyncMock,
+            return_value=(False, False),
+        ):
+            result = await mgr._wait_for_required_workflows_and_retry(pr, "org", "repo")
+
+        assert result is False
+        # The terminal exception is stored for failure reporting.
+        assert mgr._last_merge_exception["org/repo#39"] is terminal_exc
+        client.merge_pull_request.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_still_pending_at_deadline_returns_false(self):
+        """Workflows never finish: recovery is bounded by merge_timeout."""
+        mgr, client = self._make_mgr(merge_timeout=0.1)
+        pr = _make_pr_info(mergeable_state="blocked")
+        client.get = AsyncMock(
+            return_value={
+                "mergeable": True,
+                "mergeable_state": "blocked",
+                "state": "open",
+            }
+        )
+        client.merge_pull_request = AsyncMock(
+            side_effect=_make_405_workflows_not_satisfied_exception()
+        )
+
+        with patch.object(
+            mgr,
+            "_wait_for_auto_merge",
+            new_callable=AsyncMock,
+            return_value=(False, False),
+        ):
+            result = await mgr._wait_for_required_workflows_and_retry(pr, "org", "repo")
+
+        assert result is False
+        # At least one retry was dispatched before the budget expired.
+        assert client.merge_pull_request.await_count >= 1
+
+
+class TestPendingWorkflowsMergeSinglePrRouting:
+    """_merge_single_pr routes 405 pending-workflows rejections to recovery."""
+
+    def _patches(self, mgr, merge_retry, wf_recovery):
+        from dependamerge.github2gerrit_detector import (
+            GitHub2GerritDetectionResult,
+        )
+
+        no_g2g = GitHub2GerritDetectionResult()
+        return (
+            patch.object(
+                mgr,
+                "_detect_github2gerrit",
+                new_callable=AsyncMock,
+                return_value=no_g2g,
+            ),
+            patch.object(
+                mgr,
+                "_get_merge_method_for_repo",
+                new_callable=AsyncMock,
+                return_value="merge",
+            ),
+            patch.object(
+                mgr,
+                "_trigger_stale_precommit_ci",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                mgr,
+                "_check_merge_requirements",
+                new_callable=AsyncMock,
+                return_value=(True, ""),
+            ),
+            patch.object(
+                mgr,
+                "_approve_and_retry_if_review_required",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                mgr,
+                "_fetch_pr_state_now",
+                new_callable=AsyncMock,
+                return_value=("open", False),
+            ),
+            patch.object(
+                mgr,
+                "_detect_stuck_required_check",
+                new_callable=AsyncMock,
+                return_value=(False, None, 0.0),
+            ),
+            patch.object(mgr, "_merge_pr_with_retry", merge_retry),
+            patch.object(mgr, "_wait_for_required_workflows_and_retry", wf_recovery),
+        )
+
+    @pytest.mark.asyncio
+    async def test_not_satisfied_rejection_invokes_recovery(self):
+        """ "not satisfied" → wait-and-retry recovery merges the PR."""
+        from contextlib import ExitStack
+
+        from dependamerge.merge_manager import MergeStatus
+
+        mgr, client = make_merge_manager(merge_method="merge", preview_mode=False)
+        pr = _make_pr_info(mergeable_state="clean", mergeable=True)
+        client.get = AsyncMock(return_value={})
+        client.get_required_status_checks = AsyncMock(return_value=[])
+
+        async def failing_merge(pr_info, owner, repo):
+            mgr._last_merge_exception[f"{owner}/{repo}#{pr_info.number}"] = (
+                _make_405_workflows_not_satisfied_exception()
+            )
+            return False
+
+        merge_retry = AsyncMock(side_effect=failing_merge)
+        wf_recovery = AsyncMock(return_value=True)
+
+        with ExitStack() as stack:
+            for p in self._patches(mgr, merge_retry, wf_recovery):
+                stack.enter_context(p)
+            result = await mgr._merge_single_pr(pr)
+
+        wf_recovery.assert_awaited_once()
+        assert result.status == MergeStatus.MERGED
+
+    @pytest.mark.asyncio
+    async def test_failed_rejection_skips_recovery(self):
+        """ "failed" → terminal: no wait-and-retry, PR reported failed."""
+        from contextlib import ExitStack
+
+        from dependamerge.merge_manager import MergeStatus
+
+        mgr, client = make_merge_manager(merge_method="merge", preview_mode=False)
+        pr = _make_pr_info(mergeable_state="clean", mergeable=True)
+        client.get = AsyncMock(return_value={})
+        client.get_required_status_checks = AsyncMock(return_value=[])
+
+        async def failing_merge(pr_info, owner, repo):
+            mgr._last_merge_exception[f"{owner}/{repo}#{pr_info.number}"] = (
+                _make_405_workflows_failed_exception()
+            )
+            return False
+
+        merge_retry = AsyncMock(side_effect=failing_merge)
+        wf_recovery = AsyncMock(return_value=True)
+
+        with ExitStack() as stack:
+            for p in self._patches(mgr, merge_retry, wf_recovery):
+                stack.enter_context(p)
+            result = await mgr._merge_single_pr(pr)
+
+        wf_recovery.assert_not_awaited()
+        assert result.status == MergeStatus.FAILED
