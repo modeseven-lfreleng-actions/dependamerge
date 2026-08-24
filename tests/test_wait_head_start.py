@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from dependamerge.merge_manager import MergeResult, MergeStatus
 from dependamerge.models import PullRequestInfo
 from tests.conftest import make_merge_manager
 
@@ -254,6 +255,30 @@ class TestPerRunState:
         # for the same reason, and its window can outlast the gap
         # between two runs.
         client.clear_block_reasons.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_an_empty_batch_clears_the_previous_run_results(self) -> None:
+        """A batch filtered down to nothing must not report the last run.
+
+        ``_results`` is run-scoped exactly like the observations above,
+        and it is what ``get_results_summary``, ``get_failed_prs`` and
+        ``get_successful_prs`` read.  Reuse is explicitly supported, so a
+        caller that filters a batch to empty --- everything already
+        merged, or everything excluded --- would otherwise be shown the
+        *previous* batch's outcomes as though they belonged to this run.
+        """
+        mgr, _ = _mgr()
+        mgr._results = [
+            MergeResult(pr_info=_pr(), status=MergeStatus.FAILED, error="boom"),
+            MergeResult(pr_info=_pr(), status=MergeStatus.MERGED),
+        ]
+
+        assert await mgr.merge_prs_parallel([]) == []
+
+        assert mgr._results == []
+        assert mgr.get_failed_prs() == []
+        assert mgr.get_successful_prs() == []
+        assert mgr.get_results_summary()["total"] == 0
 
 
 class TestTheClockStopsBeforeTheSlotIsReacquired:

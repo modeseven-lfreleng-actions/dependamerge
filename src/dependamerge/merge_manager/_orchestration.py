@@ -71,8 +71,13 @@ class _OrchestrationMixin(_MergeManagerBase):
         if self._github_client is not None:
             self._github_client.clear_block_reasons()
 
-        if not pr_list:
-            return []
+        # The accumulated results are run-scoped for the same reason, and
+        # are read back by ``get_results_summary``, ``get_failed_prs`` and
+        # ``get_successful_prs``.  Clearing them here rather than only on
+        # the normal path means a batch that filters down to nothing ---
+        # everything already merged, or everything excluded --- reports an
+        # empty run instead of the previous run's outcomes.
+        self._results = []
 
         # Resolve the owner-wide global wait ceiling for this run.  A
         # positive ``max_wait`` becomes a monotonic wall-clock deadline
@@ -87,6 +92,14 @@ class _OrchestrationMixin(_MergeManagerBase):
         self._no_wait = self._max_wait is not None and self._max_wait <= 0
         if self._max_wait is not None and self._max_wait > 0:
             self._run_deadline = asyncio.get_running_loop().time() + self._max_wait
+
+        # Every piece of run-scoped state is now reset, so an empty batch
+        # leaves the manager in the same condition a real run would.  The
+        # guard sits here rather than earlier because nothing above needs
+        # a PR, while everything below does --- the org-approval lookup
+        # reads ``pr_list[0]``.
+        if not pr_list:
+            return []
 
         if self.preview_mode:
             self.log.info(f"🔍 PREVIEW: Would merge {len(pr_list)} PRs")
