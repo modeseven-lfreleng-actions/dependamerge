@@ -242,6 +242,85 @@ async def test_striped_handles_duplicate_work_item_objects():
     assert len(recorder.dispatch_order) == 3
 
 
+class TestCancellationIsNotAResult:
+    """Cancellation must tear the run down, not enter the results list.
+
+    ``asyncio.CancelledError`` derives from ``BaseException`` rather than
+    ``Exception``, so it misses the ``isinstance(result, Exception)``
+    branch in ``_collect_results``.  The ``cast`` that follows is a no-op
+    at runtime, so without an explicit guard the exception object itself
+    is appended to the results list and only fails later --- and further
+    away --- when a caller touches ``.status``, with nothing connecting
+    the error to the PR that was cancelled.
+
+    The two schedulers must also agree here: ``_run_striped`` has always
+    re-raised cancellation explicitly, so interrupting an owner-wide run
+    and interrupting a single-repository run should fail the same way.
+    """
+
+    @pytest.mark.asyncio
+    async def test_flat_propagates_cancellation(self) -> None:
+        pr_list: list[PRPair] = [
+            (_make_pr(1, "owner/a"), None),
+            (_make_pr(2, "owner/b"), None),
+        ]
+        mgr = _manager(concurrency=5)
+
+        async def _cancel_one(pr_info: PullRequestInfo) -> MergeResult:
+            if pr_info.repository_full_name == "owner/b":
+                raise asyncio.CancelledError
+            return MergeResult(pr_info=pr_info, status=MergeStatus.MERGED)
+
+        mgr._merge_single_pr = _cancel_one  # type: ignore[assignment]
+
+        with pytest.raises(asyncio.CancelledError):
+            await mgr.merge_prs_parallel(pr_list)
+
+    @pytest.mark.asyncio
+    async def test_striped_propagates_cancellation(self) -> None:
+        """The pre-existing behaviour the flat path now matches."""
+        pr_list: list[PRPair] = [
+            (_make_pr(1, "owner/a"), None),
+            (_make_pr(2, "owner/b"), None),
+        ]
+        mgr = _manager(concurrency=5)
+
+        async def _cancel_one(pr_info: PullRequestInfo) -> MergeResult:
+            if pr_info.repository_full_name == "owner/b":
+                raise asyncio.CancelledError
+            return MergeResult(pr_info=pr_info, status=MergeStatus.MERGED)
+
+        mgr._merge_single_pr = _cancel_one  # type: ignore[assignment]
+
+        with pytest.raises(asyncio.CancelledError):
+            await mgr.merge_prs_parallel(pr_list, stripe=True)
+
+    @pytest.mark.asyncio
+    async def test_flat_still_converts_ordinary_failures_in_order(self) -> None:
+        """Narrowing the guard must not disturb ordinary per-PR failures."""
+        pr_list: list[PRPair] = [
+            (_make_pr(1, "owner/a"), None),
+            (_make_pr(2, "owner/b"), None),
+            (_make_pr(3, "owner/c"), None),
+        ]
+        mgr = _manager(concurrency=5)
+
+        async def _fail_middle(pr_info: PullRequestInfo) -> MergeResult:
+            if pr_info.number == 2:
+                raise RuntimeError("boom")
+            return MergeResult(pr_info=pr_info, status=MergeStatus.MERGED)
+
+        mgr._merge_single_pr = _fail_middle  # type: ignore[assignment]
+
+        results = await mgr.merge_prs_parallel(pr_list)
+
+        assert [r.pr_info.number for r in results] == [1, 2, 3]
+        assert results[1].status is MergeStatus.FAILED
+        assert results[1].error and "boom" in results[1].error
+        assert results[0].status is MergeStatus.MERGED
+        assert results[2].status is MergeStatus.MERGED
+
+
 @pytest.mark.asyncio
 async def test_run_deadline_reset_between_runs_on_reused_manager():
     """A reused manager must not carry a stale ``_run_deadline``.

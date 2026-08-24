@@ -31,9 +31,24 @@ class _OutcomeTrackingMixin(_MergeManagerBase):
         Converts any propagated exception (from a per-PR task run with
         ``return_exceptions=True``) into a FAILED result for the matching
         PR, preserving the input ordering.
+
+        A ``BaseException`` that is not an ``Exception`` --- cancellation
+        in practice --- is re-raised rather than converted, so an
+        interrupted run fails as a cancellation instead of yielding a
+        results list with an exception object in it.
         """
         final_results: list[MergeResult] = []
         for i, result in enumerate(results):
+            if isinstance(result, BaseException) and not isinstance(result, Exception):
+                # ``asyncio.CancelledError`` derives from BaseException,
+                # not Exception, so it would otherwise fall through to the
+                # ``cast`` below --- a no-op at runtime, which would place
+                # the exception object in the results list and surface it
+                # much later as an ``AttributeError`` on ``.status``, with
+                # nothing tying it back to the cancelled PR.  Re-raising
+                # lets cancellation tear the run down here, matching
+                # ``_run_striped``, which propagates it explicitly.
+                raise result
             if isinstance(result, Exception):
                 pr_info = pr_list[i][0]
                 error_result = MergeResult(
